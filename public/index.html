@@ -8,7 +8,6 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@500;600;700;800&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,300&display=swap" rel="stylesheet" />
   <script src="https://cdn.tailwindcss.com"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
   <style>
     *, body { font-family: 'DM Sans', sans-serif; }
     h1, h2, h3, .font-display, .section-title, .section-num { font-family: 'Syne', sans-serif !important; }
@@ -361,13 +360,38 @@
 <script>
   const SUPABASE_URL = "https://uhzszyfzgpxxtjkcjmjj.supabase.co";
   const SUPABASE_ANON = "sb_publishable_v9I3PmU_i4PgcGCxMBH_cQ_B7gy9iiP";
-  const LS_KEY = "lmis:public-intakes";
+  const INTAKE_KEY = "lmis:intakes";   // must match INTAKE_KEY in App.jsx
+  const LS_KEY = "lmis:public-intakes"; // localStorage fallback
 
-  // Init Supabase
-  let supa = null;
-  try {
-    supa = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
-  } catch(e) { console.warn("Supabase init failed:", e); }
+  // Direct REST helper — new publishable key format only needs apikey header, no Bearer
+  async function sbFetch(path, opts = {}) {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+      ...opts,
+      headers: {
+        apikey: SUPABASE_ANON,
+        "Content-Type": "application/json",
+        ...(opts.headers || {}),
+      },
+    });
+    if (res.status === 204) return null;
+    const text = await res.text();
+    if (!res.ok) throw new Error(`Supabase ${res.status}: ${text}`);
+    return text ? JSON.parse(text) : null;
+  }
+
+  // Append one record to the lmis:intakes queue in Supabase app_state table.
+  // Reads current array, appends, writes back (same pattern the LMIS uses).
+  async function saveToLMIS(rec) {
+    const key = INTAKE_KEY;
+    const rows = await sbFetch(`app_state?key=eq.${encodeURIComponent(key)}&select=value`);
+    const current = Array.isArray(rows?.[0]?.value) ? rows[0].value : [];
+    const updated = [...current, rec];
+    await sbFetch("app_state", {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates" },
+      body: JSON.stringify([{ key, value: updated, updated_at: new Date().toISOString() }]),
+    });
+  }
 
   // Parse cohort from URL hash (format: #cohortId or ?cohort=xxx)
   function getCohortId() {
@@ -493,32 +517,17 @@
       cohortId, cohortLabel, clientRef,
     };
 
-    let saved = false;
-
-    // Try Supabase first
-    if (supa) {
-      try {
-        const { error } = await supa.from("intake_submissions").insert({
-          first_name: rec.firstName, last_name: rec.lastName,
-          id_number: rec.idNumber || rec.altId || "",
-          cell: rec.cell || "", email: rec.email || "",
-          employer_name: rec.employerName || "",
-          cohort_ref: clientRef || cohortId || "",
-          data: rec, status: "Pending Review",
-        });
-        if (!error) saved = true;
-        else console.warn("Supabase error:", error);
-      } catch(ex) { console.warn("Supabase exception:", ex); }
-    }
-
-    // Fallback: localStorage
-    if (!saved) {
+    // Save to Supabase app_state (same table/key the LMIS reads from)
+    try {
+      await saveToLMIS(rec);
+    } catch(ex) {
+      console.warn("Supabase save failed, using localStorage fallback:", ex);
+      // Fallback: localStorage on this device
       try {
         const existing = JSON.parse(localStorage.getItem(LS_KEY) || "[]");
         existing.push(rec);
         localStorage.setItem(LS_KEY, JSON.stringify(existing));
-        saved = true;
-      } catch(ex) { console.error("localStorage save failed:", ex); }
+      } catch(lsEx) { console.error("localStorage also failed:", lsEx); }
     }
 
     // Show success
