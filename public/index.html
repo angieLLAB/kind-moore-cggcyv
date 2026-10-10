@@ -360,8 +360,9 @@
 <script>
   const SUPABASE_URL = "https://uhzszyfzgpxxtjkcjmjj.supabase.co";
   const SUPABASE_ANON = "sb_publishable_v9I3PmU_i4PgcGCxMBH_cQ_B7gy9iiP";
-  const INTAKE_KEY = "lmis:intakes";   // must match INTAKE_KEY in App.jsx
-  const LS_KEY = "lmis:public-intakes"; // localStorage fallback
+  // Version label of the privacy notice learners are shown. Table column is required.
+  // Change this when the notice changes. TODO: replace with the real notice version.
+  const PRIVACY_NOTICE_VERSION = "pending-notice-v0";
 
   // Direct REST helper — new publishable key format only needs apikey header, no Bearer
   async function sbFetch(path, opts = {}) {
@@ -379,17 +380,16 @@
     return text ? JSON.parse(text) : null;
   }
 
-  // Append one record to the lmis:intakes queue in Supabase app_state table.
-  // Reads current array, appends, writes back (same pattern the LMIS uses).
-  async function saveToLMIS(rec) {
-    const key = INTAKE_KEY;
-    const rows = await sbFetch(`app_state?key=eq.${encodeURIComponent(key)}&select=value`);
-    const current = Array.isArray(rows?.[0]?.value) ? rows[0].value : [];
-    const updated = [...current, rec];
-    await sbFetch("app_state", {
+  // Insert ONE new row into public_intake. Nothing is read back, so the form
+  // never sees any other learner's details (anon can insert only).
+  async function saveIntake(rec) {
+    await sbFetch("public_intake", {
       method: "POST",
-      headers: { Prefer: "resolution=merge-duplicates" },
-      body: JSON.stringify([{ key, value: updated, updated_at: new Date().toISOString() }]),
+      headers: { Prefer: "return=minimal" },
+      body: JSON.stringify(Object.assign(
+        { status: "Pending Review", privacy_notice_version: PRIVACY_NOTICE_VERSION, data: rec },
+        (window.crypto && crypto.randomUUID) ? { id: crypto.randomUUID() } : {}
+      )),
     });
   }
 
@@ -517,17 +517,15 @@
       cohortId, cohortLabel, clientRef,
     };
 
-    // Save to Supabase app_state (same table/key the LMIS reads from)
+    // Save one row to Supabase public_intake. If it fails, tell the learner honestly.
     try {
-      await saveToLMIS(rec);
-    } catch(ex) {
-      console.warn("Supabase save failed, using localStorage fallback:", ex);
-      // Fallback: localStorage on this device
-      try {
-        const existing = JSON.parse(localStorage.getItem(LS_KEY) || "[]");
-        existing.push(rec);
-        localStorage.setItem(LS_KEY, JSON.stringify(existing));
-      } catch(lsEx) { console.error("localStorage also failed:", lsEx); }
+      await saveIntake(rec);
+    } catch (ex) {
+      console.error("Submission failed:", ex);
+      showError("We could not submit your form. Please check your internet connection and try again. If it keeps failing, contact Learnership Lab on 082 680 9636 / 079 520 0186.");
+      btn.disabled = false;
+      btn.innerHTML = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg> Submit Form';
+      return;
     }
 
     // Show success
